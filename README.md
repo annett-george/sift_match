@@ -37,15 +37,7 @@ Core Requirements:
 6. Design:
 - Modern, clean recruiter dashboard aesthetic with Tailwind CSS, Lucide icons, accessible responsive layouts, toast alerts, and robust empty/loading states. All buttons and flows must be fully functional.
 
-This project was built with [Lovable](https://lovable.dev).
 
-## Build with Lovable
-
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/488e4b03-374a-4163-8e58-fbf2d8b70d79).
-
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
 
 ## Development
 
