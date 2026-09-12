@@ -26,7 +26,7 @@ Core Requirements:
 - Candidate Detail: Full candidate profile, target role, deterministic score breakdown cards/bars, matching skills with quoted evidence, skill gaps, projects/experience/certs, personalized interview questions, recruiter feedback form (Accept / Reject / Needs Review + notes).
 - Comparison Page: Multi-candidate side-by-side matrix comparison for any selected role across scores, strengths, gaps, education, and recommendations.
 - Analytics Page: Distribution charts (recharts) for scores, common skills, top skill gaps, recommendation splits, average experience match %.
-- Settings Page: Active mode badge, model info (GPT-6 Astra), editable scoring weights, Blind Screening toggle, system status indicators.
+- Settings Page: Active mode badge, model info (GPT-5.6 Terra), editable scoring weights, Blind Screening toggle, system status indicators.
 
 5. Key Interactive Features:
 - Blind Screening Toggle: When active, obfuscates candidate names, avatars, age, gender, and contact details across the entire UI.

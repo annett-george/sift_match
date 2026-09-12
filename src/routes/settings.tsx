@@ -106,7 +106,7 @@ function Settings() {
                 : "Running the seeded deterministic pipeline. Add an OPENAI_API_KEY on the server to enable AI Mode."}
             </p>
             <p className="mt-3 flex items-center gap-2 text-sm">
-              <Cpu className="h-4 w-4 text-muted-foreground" /> Model: <strong>GPT-6 Astra</strong>
+              <Cpu className="h-4 w-4 text-muted-foreground" /> Model: <strong>GPT-OSS 20B via Groq</strong>
             </p>
           </section>
 

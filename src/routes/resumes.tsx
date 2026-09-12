@@ -1,5 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useRef, useState } from "react";
+import {
+  extractUploadedFile,
+  runResumeAgent,
+} from "@/lib/ai.functions";
 import { FileText, Loader2, Trash2, UploadCloud, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -29,6 +33,7 @@ type UploadItem = {
   id: string;
   name: string;
   size: number;
+  file: File;
   status: "Uploading" | "Processing" | "Completed";
   progress: number;
 };
@@ -102,12 +107,13 @@ function Resumes() {
     if (accepted.length === 0) return;
 
     const newItems: UploadItem[] = accepted.map((f, i) => ({
-      id: `${Date.now()}-${i}-${f.name}`,
-      name: f.name,
-      size: f.size,
-      status: "Uploading",
-      progress: 15,
-    }));
+  id: `${Date.now()}-${i}-${f.name}`,
+  name: f.name,
+  size: f.size,
+  file: f,
+  status: "Uploading",
+  progress: 15,
+}));
     setItems((prev) => [...prev, ...newItems]);
     toast.success(`${accepted.length} resume(s) uploading`);
 
@@ -125,21 +131,108 @@ function Resumes() {
     });
   };
 
-  const process = () => {
-    const ready = items.filter((i) => i.status === "Completed");
-    if (ready.length === 0) {
-      toast.error("Upload at least one resume before running the pipeline.");
-      return;
+  const process = async () => {
+  const ready = items.filter((i) => i.status === "Completed");
+
+  if (ready.length === 0) {
+    toast.error("Upload at least one resume before running the pipeline.");
+    return;
+  }
+
+  setProcessing(true);
+
+  try {
+    for (const item of ready) {
+      const arrayBuffer = await item.file.arrayBuffer();
+
+      const bytes = new Uint8Array(arrayBuffer);
+
+      let binary = "";
+
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i] ?? 0);
+      }
+
+      const base64 = btoa(binary);
+
+      const extension = item.name
+        .split(".")
+        .pop()
+        ?.toLowerCase();
+
+      const fileType =
+        extension === "pdf"
+          ? "pdf"
+          : extension === "docx"
+            ? "docx"
+            : "txt";
+
+     const extracted = await extractUploadedFile({
+  data: {
+    fileName: item.name,
+    fileType,
+    base64,
+  },
+});
+
+console.log("EXTRACTED FILE:", extracted.fileName);
+console.log("EXTRACTED TEXT:", extracted.text);
+
+const resume = await runResumeAgent({
+  data: {
+    fileName: extracted.fileName,
+    text: extracted.text,
+  },
+});
+
+console.log("RESUME AGENT RESULT:", resume);
+
+if (!resume.isResume) {
+  toast.error(
+    `${item.name} does not appear to be a resume.`
+  );
+  continue;
+}
+
+const candidate: Candidate = {
+  id: `ai-${Date.now()}-${item.name}`,
+  name: resume.name || "Unknown Candidate",
+  email: resume.email,
+  phone: resume.phone,
+  location: resume.location,
+  age: 0,
+  gender: "Not stated",
+  title: resume.title || "Candidate",
+  years: resume.years,
+  summary: resume.summary,
+  skills: resume.skills,
+  education: resume.education,
+  experience: resume.experience,
+  projects: resume.projects,
+  certifications: resume.certifications,
+  source: "upload",
+};
+
+await addCandidate(candidate);
+
+console.log("RESUME AGENT CREATED CANDIDATE:", candidate);
     }
-    setProcessing(true);
-    window.setTimeout(() => {
-      ready.forEach((item, i) => addCandidate(candidateFromFile(item.name, candidates.length + i)));
-      runPipeline(`${ready.length} resume(s)`);
-      setItems([]);
-      setProcessing(false);
-      toast.success(`${ready.length} profile(s) added to the talent pool.`);
-    }, 900);
-  };
+
+    toast.success(
+      `${ready.length} file(s) successfully read. Check the browser console for extracted text.`,
+    );
+  } catch (error) {
+    console.error("File extraction failed:", error);
+
+    toast.error(
+      error instanceof Error
+        ? error.message
+        : "Unable to read the uploaded file.",
+    );
+  } finally {
+    setProcessing(false);
+  }
+};
 
   return (
     <div>

@@ -15,6 +15,15 @@ import { StoreProvider, useStore } from "../lib/store";
 import { AppShell } from "../components/app-shell";
 import { Toaster } from "../components/ui/sonner";
 import { getAiStatus } from "../lib/ai.functions";
+import { supabase } from "../lib/supabase";
+
+console.log("SiftMatch Supabase client:", supabase);
+supabase
+  .from("candidates")
+  .select("*", { count: "exact", head: true })
+  .then(({ count, error }) => {
+    console.log("SiftMatch database test:", { count, error });
+  });
 
 function NotFoundComponent() {
   return (

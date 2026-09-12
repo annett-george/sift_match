@@ -26,209 +26,682 @@ export const WEIGHT_LABELS: Record<keyof Weights, string> = {
   certifications: "Certifications",
 };
 
-const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9+#. ]/g, " ").replace(/\s+/g, " ").trim();
+/* ---------------------------------------------------------
+   Text normalization
+--------------------------------------------------------- */
 
-function has(haystack: string, needle: string) {
-  return norm(haystack).includes(norm(needle));
+const norm = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9+#. ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+function clamp01(value: number) {
+  return Math.max(
+    0,
+    Math.min(1, Number.isFinite(value) ? value : 0),
+  );
 }
 
-function skillMatches(candidate: Candidate, skill: string) {
-  return candidate.skills.some((s) => norm(s) === norm(skill) || has(s, skill) || has(skill, s));
+function round1(value: number) {
+  return Math.round(value * 10) / 10;
 }
 
-/** Deterministic 0..1 skill coverage: must-have counts double. */
+/* ---------------------------------------------------------
+   Skill aliases
+   Helps the deterministic engine understand common
+   equivalent names without depending on an LLM.
+--------------------------------------------------------- */
+
+const SKILL_ALIASES: Record<string, string[]> = {
+  javascript: ["javascript", "js"],
+  typescript: ["typescript", "ts"],
+  react: ["react", "react.js", "reactjs"],
+  nodejs: ["node.js", "nodejs", "node"],
+  python: ["python", "python3"],
+  fastapi: ["fastapi", "fast api"],
+  postgresql: ["postgresql", "postgres", "postgres db"],
+  sql: ["sql", "structured query language"],
+  restapis: ["rest api", "rest apis", "restful api", "restful apis"],
+  docker: ["docker", "containerization", "containers"],
+  aws: ["aws", "amazon web services"],
+  cicd: ["ci/cd", "ci cd", "continuous integration", "continuous deployment"],
+  git: ["git", "github", "gitlab"],
+  java: ["java"],
+  machinelearning: ["machine learning", "ml"],
+  deeplearning: ["deep learning", "dl"],
+  mongodb: ["mongodb", "mongo db", "mongo"],
+};
+
+function canonicalSkill(skill: string) {
+  const normalized = norm(skill);
+
+  for (const [canonical, aliases] of Object.entries(SKILL_ALIASES)) {
+    if (
+      aliases.some(
+        (alias) =>
+          normalized === norm(alias) ||
+          normalized.includes(norm(alias)),
+      )
+    ) {
+      return canonical;
+    }
+  }
+
+  return normalized;
+}
+
+function skillMatches(candidate: Candidate, requiredSkill: string) {
+  const required = canonicalSkill(requiredSkill);
+
+  return candidate.skills.some(
+    (candidateSkill) =>
+      canonicalSkill(candidateSkill) === required,
+  );
+}
+
+/* ---------------------------------------------------------
+   Skills — 40%
+   
+   Must-have skills count double.
+--------------------------------------------------------- */
+
 function skillScore(candidate: Candidate, job: Job) {
-  let got = 0;
-  let total = 0;
-  for (const s of job.mustHave) {
-    total += 2;
-    if (skillMatches(candidate, s)) got += 2;
+  let earned = 0;
+  let possible = 0;
+
+  for (const skill of job.mustHave) {
+    possible += 2;
+
+    if (skillMatches(candidate, skill)) {
+      earned += 2;
+    }
   }
-  for (const s of job.niceToHave) {
-    total += 1;
-    if (skillMatches(candidate, s)) got += 1;
+
+  for (const skill of job.niceToHave) {
+    possible += 1;
+
+    if (skillMatches(candidate, skill)) {
+      earned += 1;
+    }
   }
-  return total === 0 ? 0 : got / total;
+
+  return possible === 0
+    ? 1
+    : clamp01(earned / possible);
 }
 
-function experienceScore(candidate: Candidate, job: Job) {
-  const ratio = job.minYears === 0 ? 1 : candidate.years / job.minYears;
-  const base = Math.min(1, ratio);
-  const titleWords = norm(job.title).split(" ").filter((w) => w.length > 3);
-  const roleText = candidate.experience.map((e) => `${e.role} ${e.company}`).join(" ");
-  const relevance = titleWords.length
-    ? titleWords.filter((w) => has(roleText, w) || has(candidate.title, w)).length / titleWords.length
-    : 0;
-  return clamp01(base * 0.75 + relevance * 0.25);
+/* ---------------------------------------------------------
+   Experience — 25%
+--------------------------------------------------------- */
+
+function experienceScore(
+  candidate: Candidate,
+  job: Job,
+) {
+  if (job.minYears <= 0) {
+    return 1;
+  }
+
+  const experienceRatio =
+    candidate.years / job.minYears;
+
+  const quantityScore = clamp01(experienceRatio);
+
+  const titleWords = norm(job.title)
+    .split(" ")
+    .filter((word) => word.length > 3);
+
+  const candidateRoles = candidate.experience
+    .map((experience) =>
+      `${experience.role} ${experience.company}`,
+    )
+    .join(" ");
+
+  const titleRelevance =
+    titleWords.length === 0
+      ? 0
+      : titleWords.filter(
+          (word) =>
+            norm(candidate.title).includes(word) ||
+            norm(candidateRoles).includes(word),
+        ).length / titleWords.length;
+
+  return clamp01(
+    quantityScore * 0.75 +
+      titleRelevance * 0.25,
+  );
 }
+
+/* ---------------------------------------------------------
+   Projects — 15%
+--------------------------------------------------------- */
 
 function projectScore(candidate: Candidate, job: Job) {
-  if (job.projectKeywords.length === 0) return 0;
-  const text = candidate.projects
-    .map((p) => `${p.name} ${p.description} ${p.skills.join(" ")}`)
-    .join(" ");
-  const hits = job.projectKeywords.filter((k) => has(text, k)).length;
-  return clamp01(hits / job.projectKeywords.length);
-}
-
-function responsibilityScore(candidate: Candidate, job: Job) {
-  if (job.responsibilities.length === 0) return 0;
-  const text = candidate.experience.flatMap((e) => e.bullets).join(" ");
-  let hits = 0;
-  for (const r of job.responsibilities) {
-    const keywords = norm(r).split(" ").filter((w) => w.length > 4);
-    const matched = keywords.filter((k) => has(text, k)).length;
-    if (keywords.length && matched / keywords.length >= 0.34) hits += 1;
+  if (job.projectKeywords.length === 0) {
+    return 1;
   }
-  return clamp01(hits / job.responsibilities.length);
-}
 
-const LEVELS = { Diploma: 1, Bachelors: 2, Masters: 3, PhD: 4 } as const;
+  const projectText = candidate.projects
+    .map(
+      (project) =>
+        `${project.name} ${project.description} ${project.skills.join(" ")}`,
+    )
+    .join(" ");
 
-function educationScore(candidate: Candidate, job: Job) {
-  const levelScore = Math.min(1, LEVELS[candidate.education.level] / LEVELS[job.educationLevel]);
-  const fieldScore = has(candidate.education.field, job.educationField) ||
-    has(job.educationField, candidate.education.field)
-    ? 1
-    : 0.5;
-  return clamp01(levelScore * 0.6 + fieldScore * 0.4);
-}
-
-function certificationScore(candidate: Candidate, job: Job) {
-  if (job.certifications.length === 0) return candidate.certifications.length ? 1 : 0.5;
-  const hits = job.certifications.filter((c) =>
-    candidate.certifications.some((cc) => has(cc, c) || has(c, cc)),
+  const hits = job.projectKeywords.filter(
+    (keyword) =>
+      norm(projectText).includes(norm(keyword)),
   ).length;
-  return clamp01(hits / job.certifications.length);
+
+  return clamp01(
+    hits / job.projectKeywords.length,
+  );
 }
 
-function clamp01(n: number) {
-  return Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
+/* ---------------------------------------------------------
+   Responsibilities — 10%
+--------------------------------------------------------- */
+
+function responsibilityScore(
+  candidate: Candidate,
+  job: Job,
+) {
+  if (job.responsibilities.length === 0) {
+    return 1;
+  }
+
+  const experienceText = candidate.experience
+    .flatMap((experience) => experience.bullets)
+    .join(" ");
+
+  let matchedResponsibilities = 0;
+
+  for (const responsibility of job.responsibilities) {
+    const keywords = norm(responsibility)
+      .split(" ")
+      .filter((word) => word.length > 4);
+
+    if (keywords.length === 0) {
+      continue;
+    }
+
+    const matchedKeywords = keywords.filter(
+      (keyword) =>
+        norm(experienceText).includes(keyword),
+    ).length;
+
+    if (
+      matchedKeywords / keywords.length >=
+      0.34
+    ) {
+      matchedResponsibilities++;
+    }
+  }
+
+  return clamp01(
+    matchedResponsibilities /
+      job.responsibilities.length,
+  );
 }
 
-export function recommendationFor(score: number): Recommendation {
-  if (score >= 80) return "Strong";
-  if (score >= 60) return "Moderate";
+/* ---------------------------------------------------------
+   Education — 5%
+--------------------------------------------------------- */
+
+const EDUCATION_LEVELS = {
+  Diploma: 1,
+  Bachelors: 2,
+  Masters: 3,
+  PhD: 4,
+} as const;
+
+function educationScore(
+  candidate: Candidate,
+  job: Job,
+) {
+  const candidateLevel =
+  EDUCATION_LEVELS[candidate.education.level];
+
+const requiredLevel =
+  EDUCATION_LEVELS[job.educationLevel];
+
+  const levelScore = clamp01(
+    candidateLevel / requiredLevel,
+  );
+
+  const candidateField = norm(
+    candidate.education.field,
+  );
+
+  const requiredField = norm(
+    job.educationField,
+  );
+
+  const fieldScore =
+    !requiredField ||
+    requiredField === "not stated"
+      ? 1
+      : candidateField.includes(requiredField) ||
+          requiredField.includes(candidateField)
+        ? 1
+        : 0.5;
+
+  return clamp01(
+    levelScore * 0.6 +
+      fieldScore * 0.4,
+  );
+}
+
+/* ---------------------------------------------------------
+   Certifications — 5%
+--------------------------------------------------------- */
+
+function certificationScore(
+  candidate: Candidate,
+  job: Job,
+) {
+  if (job.certifications.length === 0) {
+    return 1;
+  }
+
+  if (candidate.certifications.length === 0) {
+    return 0;
+  }
+
+  const matched = job.certifications.filter(
+    (requiredCertification) =>
+      candidate.certifications.some(
+        (candidateCertification) =>
+          norm(candidateCertification).includes(
+            norm(requiredCertification),
+          ) ||
+          norm(requiredCertification).includes(
+            norm(candidateCertification),
+          ),
+      ),
+  ).length;
+
+  return clamp01(
+    matched / job.certifications.length,
+  );
+}
+
+/* ---------------------------------------------------------
+   Recommendation
+--------------------------------------------------------- */
+
+export function recommendationFor(
+  score: number,
+): Recommendation {
+  if (score >= 80) {
+    return "Strong";
+  }
+
+  if (score >= 60) {
+    return "Moderate";
+  }
+
   return "Weak";
 }
 
-function findEvidence(candidate: Candidate, skill: string): Evidence | null {
-  for (const exp of candidate.experience) {
-    const bullet = exp.bullets.find((b) => has(b, skill));
-    if (bullet) return { skill, quote: bullet, where: `${exp.role} @ ${exp.company}` };
-  }
-  for (const p of candidate.projects) {
-    if (has(p.description, skill) || p.skills.some((s) => has(s, skill))) {
-      return { skill, quote: p.description, where: `Project: ${p.name}` };
+/* ---------------------------------------------------------
+   Evidence
+--------------------------------------------------------- */
+
+function findEvidence(
+  candidate: Candidate,
+  skill: string,
+): Evidence | null {
+  for (const experience of candidate.experience) {
+    const bullet = experience.bullets.find(
+      (item) =>
+        norm(item).includes(norm(skill)),
+    );
+
+    if (bullet) {
+      return {
+        skill,
+        quote: bullet,
+        where: `${experience.role} @ ${experience.company}`,
+      };
     }
   }
-  if (has(candidate.summary, skill)) {
-    return { skill, quote: candidate.summary, where: "Resume summary" };
+
+  for (const project of candidate.projects) {
+    const matchesDescription =
+      norm(project.description).includes(
+        norm(skill),
+      );
+
+    const matchesProjectSkill =
+      project.skills.some((item) =>
+        norm(item).includes(norm(skill)),
+      );
+
+    if (
+      matchesDescription ||
+      matchesProjectSkill
+    ) {
+      return {
+        skill,
+        quote: project.description,
+        where: `Project: ${project.name}`,
+      };
+    }
   }
+
+  if (
+    norm(candidate.summary).includes(
+      norm(skill),
+    )
+  ) {
+    return {
+      skill,
+      quote: candidate.summary,
+      where: "Resume summary",
+    };
+  }
+
   return null;
 }
 
-function interviewQuestions(candidate: Candidate, job: Job, missing: string[]) {
-  const q: string[] = [];
-  const topSkill = job.mustHave.find((s) => skillMatches(candidate, s));
-  if (topSkill) {
-    q.push(
-      `Walk us through the most complex problem you solved using ${topSkill}, and what trade-offs you made.`,
+/* ---------------------------------------------------------
+   Interview questions
+--------------------------------------------------------- */
+
+function interviewQuestions(
+  candidate: Candidate,
+  job: Job,
+  missing: string[],
+) {
+  const questions: string[] = [];
+
+  const strongestSkill = job.mustHave.find(
+    (skill) =>
+      skillMatches(candidate, skill),
+  );
+
+  if (strongestSkill) {
+    questions.push(
+      `Walk us through the most complex problem you solved using ${strongestSkill}, and what trade-offs you made.`,
     );
   }
+
   if (missing[0]) {
-    q.push(
+    questions.push(
       `This role relies heavily on ${missing[0]}, which is not evident in your resume. How would you ramp up in the first 60 days?`,
     );
   }
+
   if (missing[1]) {
-    q.push(`Describe any exposure you have had to ${missing[1]}, even outside of formal work.`);
+    questions.push(
+      `Describe any exposure you have had to ${missing[1]}, even outside of formal work.`,
+    );
   }
+
   const project = candidate.projects[0];
+
   if (project) {
-    q.push(
+    questions.push(
       `In "${project.name}", how did you measure success and what would you redesign with hindsight?`,
     );
   }
-  const resp = job.responsibilities[0];
-  if (resp) q.push(`How have you handled ${resp.toLowerCase()} in a production setting?`);
-  q.push(
-    `Tell us about a time your model or analysis was wrong in production — how did you detect and correct it?`,
-  );
-  return q.slice(0, 5);
+
+  const responsibility =
+    job.responsibilities[0];
+
+  if (responsibility) {
+    questions.push(
+      `How have you handled ${responsibility.toLowerCase()} in a production setting?`,
+    );
+  }
+
+  return questions.slice(0, 5);
 }
 
-export function scoreMatch(candidate: Candidate, job: Job, weights: Weights): MatchResult {
-  const raws: Record<keyof Weights, number> = {
+/* ---------------------------------------------------------
+   MAIN MATCHING ENGINE
+--------------------------------------------------------- */
+
+export function scoreMatch(
+  candidate: Candidate,
+  job: Job,
+  weights: Weights,
+): MatchResult {
+  const raws: Record<
+    keyof Weights,
+    number
+  > = {
     skills: skillScore(candidate, job),
-    experience: experienceScore(candidate, job),
+    experience: experienceScore(
+      candidate,
+      job,
+    ),
     projects: projectScore(candidate, job),
-    responsibilities: responsibilityScore(candidate, job),
-    education: educationScore(candidate, job),
-    certifications: certificationScore(candidate, job),
+    responsibilities:
+      responsibilityScore(candidate, job),
+    education: educationScore(
+      candidate,
+      job,
+    ),
+    certifications:
+      certificationScore(candidate, job),
   };
 
-  const breakdown: Breakdown[] = (Object.keys(raws) as (keyof Weights)[]).map((key) => ({
+  /*
+   * Convert every category into weighted points.
+   * Because the default weights total 100,
+   * the final score is naturally out of 100.
+   */
+  const breakdown: Breakdown[] = (
+    Object.keys(raws) as (keyof Weights)[]
+  ).map((key) => ({
     key,
     label: WEIGHT_LABELS[key],
-    raw: raws[key],
+    raw: round1(raws[key] * 100),
     max: weights[key],
-    points: round1(raws[key] * weights[key]),
+    points: round1(
+      raws[key] * weights[key],
+    ),
   }));
 
-  const score = Math.round(breakdown.reduce((sum, b) => sum + b.points, 0));
-  const recommendation = recommendationFor(score);
+  const score = Math.round(
+    breakdown.reduce(
+      (total, item) =>
+        total + item.points,
+      0,
+    ),
+  );
 
-  const jobSkills = [...job.mustHave, ...job.niceToHave];
-  const matchingSkills = jobSkills.filter((s) => skillMatches(candidate, s));
-  const missingMustHave = job.mustHave.filter((s) => !skillMatches(candidate, s));
-  const missingNiceToHave = job.niceToHave.filter((s) => !skillMatches(candidate, s));
+  const recommendation =
+    recommendationFor(score);
+
+  /* -------------------------------------------------------
+     Skill analysis
+  ------------------------------------------------------- */
+
+  const allJobSkills = [
+    ...job.mustHave,
+    ...job.niceToHave,
+  ];
+
+  const matchingSkills =
+    allJobSkills.filter((skill) =>
+      skillMatches(candidate, skill),
+    );
+
+  const missingMustHave =
+    job.mustHave.filter(
+      (skill) =>
+        !skillMatches(candidate, skill),
+    );
+
+  const missingNiceToHave =
+    job.niceToHave.filter(
+      (skill) =>
+        !skillMatches(candidate, skill),
+    );
+
+  /* -------------------------------------------------------
+     Evidence
+  ------------------------------------------------------- */
 
   const evidence = matchingSkills
-    .map((s) => findEvidence(candidate, s))
-    .filter((e): e is Evidence => e !== null)
+    .map((skill) =>
+      findEvidence(candidate, skill),
+    )
+    .filter(
+      (item): item is Evidence =>
+        item !== null,
+    )
     .slice(0, 6);
 
+  /* -------------------------------------------------------
+     Strengths
+  ------------------------------------------------------- */
+
   const strengths: string[] = [];
-  if (raws.skills >= 0.7)
-    strengths.push(`Covers ${matchingSkills.length}/${jobSkills.length} required skills for the role.`);
-  if (candidate.years >= job.minYears)
-    strengths.push(`${candidate.years} years of experience against a ${job.minYears}-year bar.`);
-  if (raws.projects >= 0.6)
-    strengths.push(`Project portfolio maps directly to ${job.projectKeywords.slice(0, 2).join(" and ")}.`);
-  if (raws.education >= 0.9)
-    strengths.push(`${candidate.education.degree} in ${candidate.education.field} exceeds the education bar.`);
-  if (candidate.certifications.length)
-    strengths.push(`Holds ${candidate.certifications.length} relevant certification(s).`);
+
+  if (raws.skills >= 0.7) {
+    strengths.push(
+      `Covers ${matchingSkills.length}/${allJobSkills.length} listed job skills.`,
+    );
+  }
+
+  if (
+    candidate.years >= job.minYears
+  ) {
+    strengths.push(
+      `${candidate.years} years of experience meets the ${job.minYears}-year requirement.`,
+    );
+  }
+
+  if (raws.projects >= 0.6) {
+    strengths.push(
+      `Project experience aligns with the role's project requirements.`,
+    );
+  }
+
+  if (raws.education >= 0.9) {
+    strengths.push(
+      `${candidate.education.degree} in ${candidate.education.field} meets or exceeds the education requirement.`,
+    );
+  }
+
+  if (evidence.length > 0) {
+    strengths.push(
+      `${evidence.length} resume evidence item(s) support the match.`,
+    );
+  }
+
+  /* -------------------------------------------------------
+     Weaknesses
+  ------------------------------------------------------- */
 
   const weaknesses: string[] = [];
-  if (missingMustHave.length)
-    weaknesses.push(`Missing must-have skills: ${missingMustHave.join(", ")}.`);
-  if (candidate.years < job.minYears)
-    weaknesses.push(`${job.minYears - candidate.years} year(s) short of the experience requirement.`);
-  if (raws.responsibilities < 0.5)
-    weaknesses.push("Limited evidence of the day-to-day responsibilities this role demands.");
-  if (raws.certifications < 0.5) weaknesses.push("No certification overlap with the role's preferences.");
-  if (weaknesses.length === 0) weaknesses.push("No material gaps detected against the job requirements.");
 
-  const learningAreas = [...missingMustHave, ...missingNiceToHave].slice(0, 4).map((s) => `Hands-on depth in ${s}`);
+  if (missingMustHave.length > 0) {
+    weaknesses.push(
+      `Missing must-have skills: ${missingMustHave.join(", ")}.`,
+    );
+  }
 
-  const experienceMatchPct = Math.round(clamp01(candidate.years / Math.max(1, job.minYears)) * 100);
+  if (
+    candidate.years < job.minYears
+  ) {
+    weaknesses.push(
+      `${Math.max(
+        0,
+        job.minYears - candidate.years,
+      )} year(s) short of the experience requirement.`,
+    );
+  }
+
+  if (raws.responsibilities < 0.5) {
+    weaknesses.push(
+      "Limited evidence of the day-to-day responsibilities this role demands.",
+    );
+  }
+
+  if (raws.education < 0.6) {
+    weaknesses.push(
+      "Education has limited alignment with the stated requirement.",
+    );
+  }
+
+  if (
+    weaknesses.length === 0
+  ) {
+    weaknesses.push(
+      "No material gaps detected against the stated job requirements.",
+    );
+  }
+
+  /* -------------------------------------------------------
+     Learning areas
+  ------------------------------------------------------- */
+
+  const learningAreas = [
+    ...missingMustHave,
+    ...missingNiceToHave,
+  ]
+    .slice(0, 4)
+    .map(
+      (skill) =>
+        `Hands-on depth in ${skill}`,
+    );
+
+  /* -------------------------------------------------------
+     Experience percentage
+  ------------------------------------------------------- */
+
+  const experienceMatchPct =
+    job.minYears <= 0
+      ? 100
+      : Math.round(
+          clamp01(
+            candidate.years /
+              job.minYears,
+          ) * 100,
+        );
+
+  /* -------------------------------------------------------
+     Confidence
+  ------------------------------------------------------- */
+
+  const evidenceConfidence =
+    Math.min(
+      evidence.length / 6,
+      1,
+    );
 
   const confidence = Math.round(
     clamp01(
-      0.55 +
+      0.5 +
         raws.skills * 0.2 +
-        (evidence.length / 6) * 0.15 +
-        (candidate.experience.length >= 2 ? 0.1 : 0),
+        evidenceConfidence * 0.15 +
+        (candidate.experience.length >=
+        2
+          ? 0.1
+          : 0),
     ) * 100,
   );
 
-  const summary = `${candidate.name} is a ${recommendation.toLowerCase()} fit for ${job.title} with a deterministic score of ${score}/100. Skills contribute ${breakdown[0]?.points}/${weights.skills} and experience ${breakdown[1]?.points}/${weights.experience}. ${
-    missingMustHave.length
-      ? `Key gaps remain in ${missingMustHave.slice(0, 2).join(" and ")}.`
-      : "All must-have requirements are evidenced in the resume."
-  }`;
+  /* -------------------------------------------------------
+     Human-readable summary
+  ------------------------------------------------------- */
+
+  const summary =
+    `${candidate.name} is a ${recommendation.toLowerCase()} fit for ${job.title} with a deterministic score of ${score}/100. ` +
+    `Skills contribute ${breakdown.find((item) => item.key === "skills")?.points ?? 0}/${weights.skills} points and experience contributes ${breakdown.find((item) => item.key === "experience")?.points ?? 0}/${weights.experience} points. ` +
+    (
+      missingMustHave.length > 0
+        ? `Key gaps remain in ${missingMustHave.slice(0, 2).join(" and ")}.`
+        : "All must-have requirements are evidenced in the resume."
+    );
 
   return {
     id: `${candidate.id}__${job.id}`,
@@ -242,8 +715,21 @@ export function scoreMatch(candidate: Candidate, job: Job, weights: Weights): Ma
     missingMustHave,
     missingNiceToHave,
     learningAreas,
-    interviewQuestions: interviewQuestions(candidate, job, [...missingMustHave, ...missingNiceToHave]),
-    strengths: strengths.length ? strengths : ["Baseline profile with transferable fundamentals."],
+    interviewQuestions:
+      interviewQuestions(
+        candidate,
+        job,
+        [
+          ...missingMustHave,
+          ...missingNiceToHave,
+        ],
+      ),
+    strengths:
+      strengths.length > 0
+        ? strengths
+        : [
+            "Baseline profile with transferable fundamentals.",
+          ],
     weaknesses,
     summary,
     confidence,
@@ -251,8 +737,5 @@ export function scoreMatch(candidate: Candidate, job: Job, weights: Weights): Ma
   };
 }
 
-export function round1(n: number) {
-  return Math.round(n * 10) / 10;
-}
-
-export const DISCLAIMER = "AI-assisted recommendation — final decision remains with recruiter";
+export const DISCLAIMER =
+  "AI-assisted recommendation — final decision remains with recruiter";
